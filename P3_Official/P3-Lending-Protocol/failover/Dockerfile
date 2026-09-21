@@ -42,7 +42,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:5001/health || exit 1
 
 # Start script
-COPY --chown=nodejs:nodejs failover/start.sh /app/start.sh
+COPY --chown=nodejs:nodejs start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
 CMD ["/app/start.sh"]
