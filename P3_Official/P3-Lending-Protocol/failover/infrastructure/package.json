@@ -1,0 +1,31 @@
+{
+  "name": "p3-lending-failover-infrastructure",
+  "version": "1.0.0",
+  "description": "AWS CDK infrastructure for P3 Lending failover system",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "cdk": "cdk",
+    "diff": "cdk diff",
+    "deploy": "cdk deploy",
+    "destroy": "cdk destroy"
+  },
+  "keywords": [
+    "aws-cdk",
+    "failover",
+    "high-availability"
+  ],
+  "author": "P3 Lending",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "aws-cdk": "^2.150.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.150.0",
+    "constructs": "^10.3.0"
+  }
+}

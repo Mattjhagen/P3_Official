@@ -1,0 +1,2053 @@
+
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Logo } from './Logo';
+import { Button } from './Button';
+import { UserProfile, EmployeeProfile, AdminRole, KYCTier, KYCStatus, Dispute, InternalTicket, WaitlistEntry } from '../types';
+import { AdminWaitlistSyncResult, PersistenceService } from '../services/persistence';
+import { SecurityService } from '../services/security';
+import { DocumentService } from '../services/documentService';
+import { ScoreGauge } from './ScoreGauge';
+import { AdminChatWidget } from './AdminChatWidget';
+import {
+  AdminIntegrationStatus,
+  AdminOpsAlert,
+  AdminOpsSnapshot,
+  AdminOpsService,
+} from '../services/adminOpsService';
+import { RuntimeConfigKey, RuntimeConfigService } from '../services/runtimeConfigService';
+import { ClientLogEntry, ClientLogService } from '../services/clientLogService';
+import { OpsAIAnalysis, OpsAIFixService } from '../services/opsAIFixService';
+import { AdminKpiService, AdminKpiSnapshot } from '../services/adminKpiService';
+import { AdminUserLogEntry, AdminUserLogService } from '../services/adminUserLogService';
+import { AdminPushService, AdminPushStatus } from '../services/adminPushService';
+
+// Extend window definition for Tawk.to
+declare global {
+  interface Window {
+    Tawk_API?: any;
+  }
+}
+
+interface Props {
+  currentAdmin: EmployeeProfile;
+  onLogout: () => void;
+  onExitToUser?: () => void;
+}
+
+export const AdminDashboard: React.FC<Props> = ({ currentAdmin, onLogout, onExitToUser }) => {
+  const [activeTab, setActiveTab] = useState<
+    'OVERVIEW' | 'OPERATIONS' | 'USERS' | 'WAITLIST' | 'KYC' | 'DISPUTES' | 'TEAM' | 'KNOWLEDGE' | 'TELEMETRY'
+  >('OVERVIEW');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [users, setUsers] = useState<UserProfile[]>([]);
+  const [employees, setEmployees] = useState<EmployeeProfile[]>([]);
+  const [disputes, setDisputes] = useState<Dispute[]>([]);
+  const [internalTickets, setInternalTickets] = useState<InternalTicket[]>([]);
+  const [waitlist, setWaitlist] = useState<WaitlistEntry[]>([]);
+  const [isWaitlistSyncing, setIsWaitlistSyncing] = useState(false);
+  const [waitlistSyncSummary, setWaitlistSyncSummary] = useState<AdminWaitlistSyncResult | null>(null);
+  const [waitlistSyncError, setWaitlistSyncError] = useState('');
+  const [manualInviteEmail, setManualInviteEmail] = useState('');
+  const [manualInviteName, setManualInviteName] = useState('');
+  const [isManualInviting, setIsManualInviting] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  
+  // New State for Chat Blinking
+  const [hasUnreadMessages, setHasUnreadMessages] = useState(false);
+  
+  // Waitlist Batch Logic
+  const [batchSize, setBatchSize] = useState(10);
+  const [isRollingOut, setIsRollingOut] = useState(false);
+
+  // User Management State
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedUser, setSelectedUser] = useState<UserProfile | null>(null);
+
+  // Employee Onboarding State
+  const [showAddEmployee, setShowAddEmployee] = useState(false);
+  const [newEmpData, setNewEmpData] = useState({ name: '', email: '', role: 'SUPPORT' as AdminRole });
+
+  // Ticket Creation State
+  const [newTicket, setNewTicket] = useState({ subject: '', description: '', priority: 'LOW' as 'LOW' | 'MEDIUM' | 'HIGH' });
+
+  // Operations + Integrations State
+  const [opsSnapshot, setOpsSnapshot] = useState<AdminOpsSnapshot | null>(null);
+  const [isOpsLoading, setIsOpsLoading] = useState(false);
+  const [opsMessage, setOpsMessage] = useState('');
+  const [opsDrafts, setOpsDrafts] = useState<Partial<Record<RuntimeConfigKey, string>>>({
+    GEMINI_API_KEY: '',
+    COINGECKO_API_KEY: '',
+    STRIPE_DONATE_URL: '',
+    BACKEND_URL: '',
+    OPENAI_API_KEY: '',
+    OPENAI_MODEL: 'gpt-5-codex',
+    STRIPE_PAYOUTS_ENABLED: 'false',
+    BTC_WITHDRAWALS_ENABLED: 'false',
+    BTC_WITHDRAW_PROVIDER_URL: '',
+    BTC_WITHDRAW_PROVIDER_TOKEN: '',
+    IDSWYFT_API_KEY: '',
+    IDSWYFT_SANDBOX: 'true',
+    BETA_FEATURE_FLAGS: '{}',
+    SELL_CRYPTO_ACCOUNTS: '{}',
+  });
+  const [clientLogs, setClientLogs] = useState<ClientLogEntry[]>([]);
+  const [externalLogText, setExternalLogText] = useState('');
+  const [isAiAnalyzing, setIsAiAnalyzing] = useState(false);
+  const [aiAnalysis, setAiAnalysis] = useState<OpsAIAnalysis | null>(null);
+  const [remoteUserLogs, setRemoteUserLogs] = useState<AdminUserLogEntry[]>([]);
+  const [isRemoteUserLogsLoading, setIsRemoteUserLogsLoading] = useState(false);
+  const [selectedUserLogFilter, setSelectedUserLogFilter] = useState('ALL');
+  const [userLogSearchTerm, setUserLogSearchTerm] = useState('');
+  const [kpiSnapshot, setKpiSnapshot] = useState<AdminKpiSnapshot | null>(null);
+  const [isKpiLoading, setIsKpiLoading] = useState(false);
+  const [pushStatus, setPushStatus] = useState<AdminPushStatus>({
+    supported: false,
+    permission: 'unsupported',
+    subscribed: false,
+    isIos: false,
+    standalone: false,
+  });
+  const [isPushUpdating, setIsPushUpdating] = useState(false);
+
+  const [telemetryEvents, setTelemetryEvents] = useState<Array<{ id: string; anonymous_id: string; session_id: string; event_name: string; properties: Record<string, unknown>; policy_version?: string; created_at: string }>>([]);
+  const [telemetryFeatures, setTelemetryFeatures] = useState<Array<{ anonymous_id: string; session_id: string; event_count: number; last_event_at?: string; scoring_inputs: Record<string, unknown>; updated_at: string }>>([]);
+  const [isTelemetryLoading, setIsTelemetryLoading] = useState(false);
+
+  const loadOpsSnapshot = useCallback(async () => {
+    setIsOpsLoading(true);
+    try {
+      const snapshot = await AdminOpsService.getOperationalSnapshot();
+      setOpsSnapshot(snapshot);
+    } catch (error) {
+      console.error('Failed to load operations snapshot', error);
+      setOpsMessage('Could not refresh operations status. Check console logs.');
+    } finally {
+      setIsOpsLoading(false);
+    }
+  }, []);
+
+  const refreshPushStatus = useCallback(async () => {
+    try {
+      const status = await AdminPushService.getStatus();
+      setPushStatus(status);
+    } catch (error) {
+      console.error('Failed to load push status', error);
+      setOpsMessage('Unable to read notification status.');
+    }
+  }, []);
+
+  const refreshClientLogs = useCallback(() => {
+    setClientLogs(ClientLogService.getLogs(250));
+  }, []);
+
+  const loadRemoteUserLogs = useCallback(async () => {
+    setIsRemoteUserLogsLoading(true);
+    try {
+      let userId = '';
+      let email = '';
+      if (selectedUserLogFilter.startsWith('user:')) {
+        userId = selectedUserLogFilter.slice(5);
+      } else if (selectedUserLogFilter.startsWith('email:')) {
+        email = selectedUserLogFilter.slice(6);
+      }
+      const logs = await AdminUserLogService.getUserLogs({
+        userId,
+        email,
+        limit: 400,
+      });
+      setRemoteUserLogs(logs);
+      const logStatus = AdminUserLogService.getStatus();
+      if (logStatus.analyticsEventsTableMissing) {
+        setOpsMessage(
+          "Per-user logs are temporarily unavailable because 'public.analytics_events' is missing. Run the latest Supabase migrations."
+        );
+      }
+    } catch (error) {
+      console.error('Failed to load remote user logs', error);
+      setOpsMessage('Failed to refresh per-user logs.');
+    } finally {
+      setIsRemoteUserLogsLoading(false);
+    }
+  }, [selectedUserLogFilter]);
+
+  const refreshWaitlist = useCallback(
+    async (syncWithServer: boolean): Promise<WaitlistEntry[]> => {
+      if (syncWithServer) {
+        setIsWaitlistSyncing(true);
+        setWaitlistSyncError('');
+        try {
+          const syncSummary = await PersistenceService.syncAdminWaitlist(
+            currentAdmin.email,
+            currentAdmin.name
+          );
+          setWaitlistSyncSummary(syncSummary);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown sync error.';
+          setWaitlistSyncError(message);
+        } finally {
+          setIsWaitlistSyncing(false);
+        }
+      }
+
+      const entries = await PersistenceService.getAdminWaitlist(
+        currentAdmin.email,
+        currentAdmin.name
+      );
+      setWaitlist(entries || []);
+      return entries || [];
+    },
+    [currentAdmin.email, currentAdmin.name]
+  );
+
+  useEffect(() => {
+    // Load data (parallelized for faster initial load)
+    const loadData = async () => {
+      try {
+        const [u, e, t, d, w] = await Promise.all([
+          PersistenceService.getAllUsers(),
+          PersistenceService.getEmployees(),
+          PersistenceService.getInternalTickets(),
+          PersistenceService.getAllDisputes(),
+          refreshWaitlist(false),
+        ]);
+        setUsers(u || []);
+        setEmployees(e || []);
+        setInternalTickets(t || []);
+        setDisputes(d || []);
+        setWaitlist(w || []);
+        setIsKpiLoading(true);
+        const snapshot = await AdminKpiService.getSnapshot(u || [], w || []);
+        setKpiSnapshot(snapshot);
+      } catch (err) {
+        console.error("Admin dashboard failed to load data", err);
+      } finally {
+        setIsKpiLoading(false);
+      }
+    };
+    loadData();
+    loadOpsSnapshot();
+    refreshClientLogs();
+    // loadRemoteUserLogs deferred until OPERATIONS tab is active
+
+    // Hide Tawk.to when in Admin Mode
+    if (window.Tawk_API && window.Tawk_API.hideWidget) {
+      window.Tawk_API.hideWidget();
+    }
+    return () => {
+      // Show again when leaving admin mode
+      if (window.Tawk_API && window.Tawk_API.showWidget) {
+        window.Tawk_API.showWidget();
+      }
+    };
+  }, [loadOpsSnapshot, refreshClientLogs, refreshWaitlist]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      refreshClientLogs();
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [refreshClientLogs]);
+
+  useEffect(() => {
+    if (activeTab !== 'OPERATIONS') return;
+    refreshPushStatus();
+    loadRemoteUserLogs();
+    const interval = setInterval(() => {
+      loadRemoteUserLogs();
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [activeTab, loadRemoteUserLogs, refreshPushStatus]);
+
+  useEffect(() => {
+    if (activeTab !== 'TELEMETRY') return;
+    setIsTelemetryLoading(true);
+    Promise.all([
+      PersistenceService.getAdminTelemetryEvents(currentAdmin.email, 50),
+      PersistenceService.getAdminTelemetryFeatures(currentAdmin.email, 50),
+    ])
+      .then(([events, features]) => {
+        setTelemetryEvents(events);
+        setTelemetryFeatures(features);
+      })
+      .catch(() => {
+        setTelemetryEvents([]);
+        setTelemetryFeatures([]);
+      })
+      .finally(() => setIsTelemetryLoading(false));
+  }, [activeTab, currentAdmin.email]);
+
+  useEffect(() => {
+    setIsSidebarOpen(false);
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (users.length === 0 && waitlist.length === 0) return;
+    const refreshKpis = async () => {
+      try {
+        const snapshot = await AdminKpiService.getSnapshot(users, waitlist);
+        setKpiSnapshot(snapshot);
+      } catch (error) {
+        console.error('KPI refresh failed', error);
+      }
+    };
+
+    const interval = setInterval(refreshKpis, 15000);
+    return () => clearInterval(interval);
+  }, [users, waitlist]);
+
+  useEffect(() => {
+    if (!opsSnapshot) return;
+    setOpsDrafts((prev) => {
+      const next = { ...prev };
+      for (const integration of opsSnapshot.integrations) {
+        if (integration.isSecret) continue;
+        if (!next[integration.key]) {
+          next[integration.key] = integration.effectiveValue;
+        }
+      }
+      return next;
+    });
+  }, [opsSnapshot]);
+
+  const handleAddEmployee = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const newEmp: EmployeeProfile = {
+      id: `emp_${Date.now()}`,
+      name: newEmpData.name,
+      email: newEmpData.email,
+      role: newEmpData.role,
+      isActive: true,
+      lastLogin: 'Never',
+      passwordHash: 'temp123', // Temp password
+      passwordLastSet: 0, // Forces immediate reset
+      previousPasswords: []
+    };
+    const updated = await PersistenceService.addEmployee(newEmp);
+    setEmployees(updated);
+    setShowAddEmployee(false);
+    setNewEmpData({ name: '', email: '', role: 'SUPPORT' });
+  };
+
+  const handleIssueCertificate = (emp: EmployeeProfile) => {
+    if (confirm(`Issue new 1-Year Security Certificate for ${emp.name}? This will invalidate previous keys.`)) {
+      const cert = SecurityService.generateCertificate(emp.email);
+      const updatedEmp = { ...emp, certificateData: cert };
+      // Note: This would be async in real app
+      PersistenceService.updateEmployee(updatedEmp).then(updatedList => setEmployees(updatedList));
+      
+      // Trigger Download
+      SecurityService.downloadCertificate(cert);
+      alert(`Certificate downloaded for ${emp.name}. They must install this file on their device to log in.`);
+    }
+  };
+
+  const handleResetPasswordLink = (emp: EmployeeProfile) => {
+    alert(`Password reset link sent to ${emp.email}.\n\n(Simulation: Next login will require a password change)`);
+    const updatedEmp = { ...emp, passwordLastSet: 0 }; // 0 forces expiry check
+    PersistenceService.updateEmployee(updatedEmp).then(updatedList => setEmployees(updatedList));
+  };
+
+  const handleFreezeAccount = async (userId: string) => {
+    if (confirm("Are you sure you want to freeze this account? All funds will be locked.")) {
+      const targetUser = users.find(u => u.id === userId);
+      if (targetUser) {
+        const updated = { ...targetUser, isFrozen: !targetUser.isFrozen };
+        await PersistenceService.saveUser(updated);
+        
+        setUsers(prev => prev.map(u => u.id === userId ? updated : u));
+        if (selectedUser?.id === userId) setSelectedUser(updated);
+      }
+    }
+  };
+
+  const handleAddAdminNote = async (userId: string) => {
+    const note = prompt("Enter note for this user account:");
+    if (note) {
+      const targetUser = users.find(u => u.id === userId);
+      if (targetUser) {
+         const existing = targetUser.adminNotes ? targetUser.adminNotes + '\n' : '';
+         const updated = { ...targetUser, adminNotes: `${existing}[${new Date().toLocaleDateString()} ${currentAdmin.name}]: ${note}` };
+         await PersistenceService.saveUser(updated);
+         
+         setUsers(prev => prev.map(u => u.id === userId ? updated : u));
+         if (selectedUser?.id === userId) setSelectedUser(updated);
+      }
+    }
+  };
+
+  // KYC Manual Action
+  const handleKYCAction = async (userId: string, action: 'APPROVE' | 'REJECT') => {
+    const targetUser = users.find(u => u.id === userId);
+    if (targetUser) {
+      const updated = {
+        ...targetUser,
+        kycStatus: action === 'APPROVE' ? KYCStatus.VERIFIED : KYCStatus.REJECTED,
+        kycTier: action === 'APPROVE' ? KYCTier.TIER_2 : targetUser.kycTier, 
+        kycLimit: action === 'APPROVE' ? 50000 : targetUser.kycLimit
+      };
+      await PersistenceService.saveUser(updated);
+      
+      setUsers(prev => prev.map(u => u.id === userId ? updated : u));
+      if (selectedUser?.id === userId) setSelectedUser(updated);
+      alert(`KYC ${action === 'APPROVE' ? 'Approved' : 'Rejected'} for User.`);
+    }
+  };
+
+  // Dispute Action
+  const handleResolveDispute = async (disputeId: string, resolution: string) => {
+    const dispute = disputes.find(d => d.id === disputeId);
+    if (dispute) {
+      const updatedDispute = { ...dispute, status: 'RESOLVED' as const, resolution };
+      await PersistenceService.saveDispute(updatedDispute);
+      setDisputes(prev => prev.map(d => d.id === disputeId ? updatedDispute : d));
+    }
+  };
+
+  const handleInviteWaitlist = async (id: string) => {
+    try {
+      const result = await PersistenceService.inviteAdminWaitlist(
+        currentAdmin.email,
+        currentAdmin.name,
+        id
+      );
+
+      const inviteUrl = `${window.location.origin}/?waitlist_invite=${encodeURIComponent(id)}`;
+      if (result.updated > 0) {
+        try {
+          await navigator.clipboard.writeText(inviteUrl);
+          alert(`User marked INVITED. Invite URL copied:\n${inviteUrl}`);
+        } catch {
+          alert(`User marked INVITED. Invite URL:\n${inviteUrl}`);
+        }
+      } else {
+        alert('This waitlist user is already invited or onboarded.');
+      }
+
+      const updated = await refreshWaitlist(false);
+      setWaitlist(updated);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to invite waitlist user.';
+      setWaitlistSyncError(message);
+      alert(message);
+    }
+  };
+
+  const handleBatchRollout = async () => {
+    if (confirm(`Are you sure you want to invite the next ${batchSize} users in the queue?`)) {
+      setIsRollingOut(true);
+      try {
+        const result = await PersistenceService.inviteNextAdminWaitlist(
+          currentAdmin.email,
+          currentAdmin.name,
+          batchSize
+        );
+        // Refresh list
+        const updated = await refreshWaitlist(false);
+        setWaitlist(updated);
+        alert(`Batch rollout complete. Requested ${result.requested}, invited ${result.updated}, skipped ${result.skipped}.`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Batch rollout failed.';
+        setWaitlistSyncError(message);
+        alert(message);
+      } finally {
+        setIsRollingOut(false);
+      }
+    }
+  };
+
+  const handleWaitlistNetlifySync = async () => {
+    const syncProxyUrl = `/.netlify/functions/admin_waitlist_proxy?path=${encodeURIComponent('/api/admin/waitlist/sync')}`;
+    if ((import.meta as any)?.env?.MODE !== 'production') {
+      console.log('[admin] sync waitlist -> proxy', syncProxyUrl);
+    }
+    await refreshWaitlist(true);
+  };
+
+  const handleManualInvite = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const normalizedEmail = String(manualInviteEmail || '').trim().toLowerCase();
+    const normalizedName = String(manualInviteName || '').trim();
+    const isValidEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail);
+
+    if (!isValidEmail) {
+      const message = 'Please enter a valid invite email.';
+      setWaitlistSyncError(message);
+      alert(message);
+      return;
+    }
+
+    setIsManualInviting(true);
+    setWaitlistSyncError('');
+
+    try {
+      const result = await PersistenceService.manualInviteAdminWaitlist(
+        currentAdmin.email,
+        currentAdmin.name,
+        normalizedEmail,
+        normalizedName
+      );
+      const updated = await refreshWaitlist(false);
+      setWaitlist(updated);
+      setManualInviteEmail('');
+      setManualInviteName('');
+      alert(
+        `Invite sent to ${result.email}.${result.created ? ' Added to waitlist and marked INVITED.' : ' Existing waitlist record updated.'}`
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Manual invite failed.';
+      setWaitlistSyncError(message);
+      alert(message);
+    } finally {
+      setIsManualInviting(false);
+    }
+  };
+
+  // Internal Ticket Actions
+  const handleCreateTicket = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const ticket: InternalTicket = {
+      id: `tick_${Date.now()}`,
+      authorId: currentAdmin.id,
+      authorName: currentAdmin.name,
+      subject: newTicket.subject,
+      description: newTicket.description,
+      priority: newTicket.priority,
+      status: 'OPEN',
+      createdAt: Date.now()
+    };
+    const updated = await PersistenceService.addInternalTicket(ticket);
+    setInternalTickets(updated);
+    setNewTicket({ subject: '', description: '', priority: 'LOW' });
+  };
+
+  const handleResolveInternalTicket = async (id: string) => {
+    const updated = await PersistenceService.resolveInternalTicket(id);
+    setInternalTickets(updated);
+  };
+
+  const handleOpsDraftChange = (key: RuntimeConfigKey, value: string) => {
+    setOpsDrafts((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleSaveIntegration = async (integration: AdminIntegrationStatus) => {
+    const nextValue = (opsDrafts[integration.key] || '').trim();
+    if (!nextValue) {
+      setOpsMessage(`Please enter a value for ${integration.label}.`);
+      return;
+    }
+
+    RuntimeConfigService.setConfigValue(integration.key, nextValue, currentAdmin.email);
+    setOpsMessage(`${integration.label} saved in runtime config.`);
+    await loadOpsSnapshot();
+  };
+
+  const handleRotateIntegration = async (integration: AdminIntegrationStatus) => {
+    const nextValue = (opsDrafts[integration.key] || '').trim();
+    if (!nextValue) {
+      setOpsMessage(`Enter a new value before rotating ${integration.label}.`);
+      return;
+    }
+
+    RuntimeConfigService.rotateConfigValue(integration.key, nextValue, currentAdmin.email);
+    setOpsMessage(`${integration.label} rotated successfully.`);
+    await loadOpsSnapshot();
+  };
+
+  const handleResetToEnvironment = async (integration: AdminIntegrationStatus) => {
+    RuntimeConfigService.clearConfigValue(integration.key);
+    setOpsMessage(`${integration.label} reset to environment/default source.`);
+    await loadOpsSnapshot();
+  };
+
+  const handleCreateAlertTicket = async (alertItem: AdminOpsAlert) => {
+    const ticket: InternalTicket = {
+      id: `tick_ops_${Date.now()}`,
+      authorId: currentAdmin.id,
+      authorName: currentAdmin.name,
+      subject: `[OPS] ${alertItem.title}`,
+      description: `${alertItem.detail}\n\nAction: ${alertItem.action}`,
+      priority: alertItem.severity === 'critical' ? 'HIGH' : 'MEDIUM',
+      status: 'OPEN',
+      createdAt: Date.now(),
+    };
+
+    const updated = await PersistenceService.addInternalTicket(ticket);
+    setInternalTickets(updated);
+    setOpsMessage(`Ticket created for alert: ${alertItem.title}`);
+  };
+
+  const getAlertClasses = (severity: AdminOpsAlert['severity']) => {
+    if (severity === 'critical') return 'border-red-500/40 bg-red-900/20 text-red-300';
+    if (severity === 'warning') return 'border-amber-500/40 bg-amber-900/20 text-amber-300';
+    return 'border-blue-500/40 bg-blue-900/20 text-blue-300';
+  };
+
+  const getIntegrationStatusClasses = (integration: AdminIntegrationStatus) => {
+    if (integration.source === 'missing') return 'text-red-400 border-red-500/40 bg-red-900/20';
+    if (integration.source === 'fallback') return 'text-amber-400 border-amber-500/40 bg-amber-900/20';
+    if (integration.source === 'runtime') return 'text-[#00e599] border-[#00e599]/40 bg-[#00e599]/10';
+    return 'text-blue-400 border-blue-500/40 bg-blue-900/20';
+  };
+
+  const isJsonIntegration = (key: RuntimeConfigKey) =>
+    key === 'BETA_FEATURE_FLAGS' || key === 'SELL_CRYPTO_ACCOUNTS';
+
+  const handleTabChange = (
+    tab: 'OVERVIEW' | 'OPERATIONS' | 'USERS' | 'WAITLIST' | 'KYC' | 'DISPUTES' | 'TEAM' | 'KNOWLEDGE' | 'TELEMETRY'
+  ) => {
+    setActiveTab(tab);
+    setIsSidebarOpen(false);
+  };
+
+  const clearClientLogs = () => {
+    ClientLogService.clearLogs();
+    refreshClientLogs();
+    setOpsMessage('Client logs cleared.');
+  };
+
+  const handleEnablePushNotifications = async () => {
+    setIsPushUpdating(true);
+    try {
+      await AdminPushService.enable();
+      await refreshPushStatus();
+      setOpsMessage('Push notifications enabled for this admin device.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to enable notifications.';
+      setOpsMessage(message);
+    } finally {
+      setIsPushUpdating(false);
+    }
+  };
+
+  const handleDisablePushNotifications = async () => {
+    setIsPushUpdating(true);
+    try {
+      await AdminPushService.disable();
+      await refreshPushStatus();
+      setOpsMessage('Push notifications disabled for this admin device.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to disable notifications.';
+      setOpsMessage(message);
+    } finally {
+      setIsPushUpdating(false);
+    }
+  };
+
+  const downloadUserLogsCsv = () => {
+    const rows = filteredRemoteUserLogs;
+    if (rows.length === 0) {
+      setOpsMessage('No user logs available to export for the current filter.');
+      return;
+    }
+
+    const escapeCsv = (value: unknown) => {
+      const normalized = String(value ?? '').replace(/\r?\n/g, ' ').replace(/"/g, '""');
+      return `"${normalized}"`;
+    };
+
+    const headers = [
+      'timestamp',
+      'email',
+      'user_id',
+      'session_id',
+      'level',
+      'source',
+      'message',
+      'context',
+    ];
+
+    const lines = [
+      headers.join(','),
+      ...rows.map((log) =>
+        [
+          log.timestamp,
+          log.email,
+          log.userId,
+          log.sessionId,
+          log.level,
+          log.source,
+          log.message,
+          log.context,
+        ]
+          .map(escapeCsv)
+          .join(',')
+      ),
+    ];
+
+    const csvContent = lines.join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filterName = selectedUserLogFilter === 'ALL'
+      ? 'all-users'
+      : selectedUserLogFilter.replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
+    const filename = `p3-user-logs-${filterName}-${timestamp}.csv`;
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    setOpsMessage(`Exported ${rows.length} user log rows to CSV.`);
+  };
+
+  const analyzeLogsWithAI = async () => {
+    setIsAiAnalyzing(true);
+    setOpsMessage('');
+    setAiAnalysis(null);
+    const currentAlerts = opsSnapshot?.alerts || [];
+
+    try {
+      const analysis = await OpsAIFixService.analyze({
+        logs: clientLogs.slice(0, 120),
+        externalLogText: externalLogText.trim(),
+        activeAlerts: currentAlerts.map((item) => ({
+          title: item.title,
+          detail: item.detail,
+          severity: item.severity,
+        })),
+        integrationSummary: (opsSnapshot?.integrations || []).map((item) => ({
+          key: item.key,
+          status: item.statusText,
+          source: item.source,
+        })),
+      });
+      setAiAnalysis(analysis);
+      setOpsMessage('AI analysis completed.');
+    } catch (error) {
+      console.error('AI analysis failed', error);
+      setOpsMessage(`AI analysis failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setIsAiAnalyzing(false);
+    }
+  };
+
+  const applyAiFixes = async () => {
+    if (!aiAnalysis || aiAnalysis.actions.length === 0) {
+      setOpsMessage('No AI actions are available to apply.');
+      return;
+    }
+
+    let applied = 0;
+    const manualSteps: string[] = [];
+
+    for (const action of aiAnalysis.actions) {
+      if (action.type === 'update_runtime_config') {
+        if (action.mode === 'rotate') {
+          RuntimeConfigService.rotateConfigValue(action.key, action.value, currentAdmin.email);
+        } else {
+          RuntimeConfigService.setConfigValue(action.key, action.value, currentAdmin.email);
+        }
+        applied += 1;
+        continue;
+      }
+
+      if (action.type === 'create_ticket') {
+        const ticket: InternalTicket = {
+          id: `tick_ai_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          authorId: currentAdmin.id,
+          authorName: currentAdmin.name,
+          subject: action.title,
+          description: action.description,
+          priority: action.priority,
+          status: 'OPEN',
+          createdAt: Date.now(),
+        };
+        const updated = await PersistenceService.addInternalTicket(ticket);
+        setInternalTickets(updated);
+        applied += 1;
+        continue;
+      }
+
+      if (action.type === 'manual_step') {
+        manualSteps.push(`${action.instruction} (${action.reason})`);
+      }
+    }
+
+    await loadOpsSnapshot();
+    refreshClientLogs();
+
+    const summary =
+      manualSteps.length > 0
+        ? `Applied ${applied} action(s). Manual follow-up: ${manualSteps.join(' | ')}`
+        : `Applied ${applied} AI action(s).`;
+    setOpsMessage(summary);
+  };
+
+  const safeUsers = users || []; // Safety fallback
+  const filteredUsers = safeUsers.filter(u => 
+    u.name?.toLowerCase().includes(searchTerm.toLowerCase()) || 
+    u.id?.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  const pendingKYCUsers = safeUsers.filter(u => u.kycStatus === KYCStatus.PENDING);
+  const openDisputes = disputes.filter(d => d.status === 'OPEN');
+  const openTickets = internalTickets.filter(t => t.status === 'OPEN');
+  const opsAlerts = opsSnapshot?.alerts || [];
+  const criticalOpsAlerts = opsAlerts.filter((item) => item.severity === 'critical');
+  const hasCriticalOpsAlerts = criticalOpsAlerts.length > 0;
+  const topSources = kpiSnapshot?.sourceBreakdown || [];
+  const topGeo = kpiSnapshot?.geoHeatmap || [];
+  const liveContacts = kpiSnapshot?.liveContacts || [];
+  const maxSourceCount = Math.max(1, ...topSources.map((item) => item.count));
+  const maxGeoCount = Math.max(1, ...topGeo.map((item) => item.count));
+  const userLogFilterOptions = useMemo(() => {
+    const options = new Map<string, { value: string; label: string }>();
+
+    safeUsers.forEach((user) => {
+      const userId = (user.id || '').trim();
+      const name = (user.name || 'User').trim() || 'User';
+      const email = (user.email || '').trim().toLowerCase();
+      if (!userId) return;
+      options.set(`user:${userId}`, {
+        value: `user:${userId}`,
+        label: `${name}${email ? ` (${email})` : ''}`,
+      });
+      if (email && !options.has(`email:${email}`)) {
+        options.set(`email:${email}`, {
+          value: `email:${email}`,
+          label: `Email: ${email}`,
+        });
+      }
+    });
+
+    liveContacts.forEach((contact) => {
+      const email = (contact.email || '').trim().toLowerCase();
+      if (!email) return;
+      if (!options.has(`email:${email}`)) {
+        options.set(`email:${email}`, {
+          value: `email:${email}`,
+          label: `Email: ${email}`,
+        });
+      }
+    });
+
+    return Array.from(options.values())
+      .sort((a, b) => a.label.localeCompare(b.label))
+      .slice(0, 500);
+  }, [safeUsers, liveContacts]);
+
+  const filteredRemoteUserLogs = useMemo(() => {
+    const query = userLogSearchTerm.trim().toLowerCase();
+    if (!query) return remoteUserLogs;
+
+    return remoteUserLogs.filter((log) => {
+      const haystack = [
+        log.email,
+        log.userId,
+        log.sessionId,
+        log.source,
+        log.message,
+        log.context,
+      ]
+        .map((item) => (item || '').toLowerCase())
+        .join(' ');
+      return haystack.includes(query);
+    });
+  }, [remoteUserLogs, userLogSearchTerm]);
+  const waitlistSummaryTotal = waitlistSyncSummary?.total ?? 0;
+
+  return (
+    <div className="relative flex min-h-screen md:h-screen bg-[#050505] text-zinc-200 font-sans overflow-hidden">
+      {/* Internal Chat Widget - Always mounted but hidden if closed */}
+      <AdminChatWidget 
+        currentUser={currentAdmin} 
+        isOpen={isChatOpen} 
+        onClose={() => setIsChatOpen(false)} 
+        onUnreadChange={setHasUnreadMessages}
+      />
+
+      {isSidebarOpen && (
+        <button
+          aria-label="Close admin navigation menu"
+          className="fixed inset-0 z-[55] bg-black/60 md:hidden"
+          onClick={() => setIsSidebarOpen(false)}
+        />
+      )}
+
+      {/* Admin Sidebar */}
+      <aside className={`fixed inset-y-0 left-0 z-[60] w-72 max-w-[86vw] bg-[#0a0a0a] border-r border-zinc-900 flex flex-col transform transition-transform duration-300 md:static md:z-50 md:translate-x-0 md:w-64 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className="p-6">
+          <div className="flex items-center gap-2 mb-1">
+            <Logo showText={false} isAdmin={true} />
+            <div>
+              <span className="font-bold text-white tracking-tight">P3 Admin</span>
+              <div className="text-[10px] text-red-500 font-bold uppercase tracking-wider">{currentAdmin.role} ACCESS</div>
+            </div>
+          </div>
+        </div>
+        
+        <nav className="flex-1 px-4 space-y-2 mt-4">
+          <button 
+            onClick={() => handleTabChange('OVERVIEW')}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${activeTab === 'OVERVIEW' ? 'bg-zinc-800 text-white' : 'text-zinc-500 hover:text-white'}`}
+          >
+            <span>📊</span> Overview
+          </button>
+          <button
+            onClick={() => handleTabChange('OPERATIONS')}
+            className={`w-full flex items-center justify-between px-4 py-3 rounded-lg transition-all ${activeTab === 'OPERATIONS' ? 'bg-zinc-800 text-white' : 'text-zinc-500 hover:text-white'}`}
+          >
+            <div className="flex items-center gap-3">
+              <span>🚨</span> Operations
+            </div>
+            {opsAlerts.length > 0 && (
+              <span className={`${criticalOpsAlerts.length > 0 ? 'bg-red-500 text-white' : 'bg-amber-500 text-black'} text-xs font-bold px-1.5 rounded-full`}>
+                {opsAlerts.length}
+              </span>
+            )}
+          </button>
+          <button 
+            onClick={() => handleTabChange('WAITLIST')}
+            className={`w-full flex items-center justify-between px-4 py-3 rounded-lg transition-all ${activeTab === 'WAITLIST' ? 'bg-zinc-800 text-white' : 'text-zinc-500 hover:text-white'}`}
+          >
+             <div className="flex items-center gap-3">
+              <span>⏳</span> Waitlist Queue
+            </div>
+            {waitlist.filter(w => w.status === 'PENDING').length > 0 && <span className="bg-[#00e599] text-black text-xs font-bold px-1.5 rounded-full">{waitlist.filter(w => w.status === 'PENDING').length}</span>}
+          </button>
+          <button 
+            onClick={() => handleTabChange('USERS')}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${activeTab === 'USERS' ? 'bg-zinc-800 text-white' : 'text-zinc-500 hover:text-white'}`}
+          >
+            <span>👥</span> User Management
+          </button>
+          
+          <button 
+            onClick={() => handleTabChange('KYC')}
+            className={`w-full flex items-center justify-between px-4 py-3 rounded-lg transition-all ${activeTab === 'KYC' ? 'bg-zinc-800 text-white' : 'text-zinc-500 hover:text-white'}`}
+          >
+            <div className="flex items-center gap-3">
+              <span>🪪</span> KYC Queue
+            </div>
+            {pendingKYCUsers.length > 0 && <span className="bg-amber-500 text-black text-xs font-bold px-1.5 rounded-full">{pendingKYCUsers.length}</span>}
+          </button>
+
+          <button 
+            onClick={() => handleTabChange('DISPUTES')}
+            className={`w-full flex items-center justify-between px-4 py-3 rounded-lg transition-all ${activeTab === 'DISPUTES' ? 'bg-zinc-800 text-white' : 'text-zinc-500 hover:text-white'}`}
+          >
+             <div className="flex items-center gap-3">
+              <span>⚖️</span> Alerts & Disputes
+            </div>
+            {openDisputes.length > 0 && <span className="bg-red-500 text-white text-xs font-bold px-1.5 rounded-full">{openDisputes.length}</span>}
+          </button>
+
+          <button 
+            onClick={() => handleTabChange('KNOWLEDGE')}
+            className={`w-full flex items-center justify-between px-4 py-3 rounded-lg transition-all ${activeTab === 'KNOWLEDGE' ? 'bg-zinc-800 text-white' : 'text-zinc-500 hover:text-white'}`}
+          >
+             <div className="flex items-center gap-3">
+              <span>📚</span> Knowledge & Tickets
+            </div>
+            {openTickets.length > 0 && <span className="bg-blue-500 text-white text-xs font-bold px-1.5 rounded-full">{openTickets.length}</span>}
+          </button>
+
+          {currentAdmin.role === 'ADMIN' && (
+            <button 
+              onClick={() => handleTabChange('TEAM')}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${activeTab === 'TEAM' ? 'bg-zinc-800 text-white' : 'text-zinc-500 hover:text-white'}`}
+            >
+              <span>🛡️</span> Team & Roles
+            </button>
+          )}
+          <button 
+            onClick={() => handleTabChange('TELEMETRY')}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${activeTab === 'TELEMETRY' ? 'bg-zinc-800 text-white' : 'text-zinc-500 hover:text-white'}`}
+          >
+            <span>📡</span> Telemetry & Consent
+          </button>
+        </nav>
+
+        <div className="p-4 border-t border-zinc-900">
+           <div className="flex items-center gap-3 mb-4 px-2">
+             <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-bold text-white">
+               {currentAdmin.name.charAt(0)}
+             </div>
+             <div className="overflow-hidden">
+               <div className="text-sm font-bold text-white truncate">{currentAdmin.name}</div>
+               <div className="text-xs text-zinc-500 truncate">{currentAdmin.email}</div>
+             </div>
+           </div>
+           <Button variant="ghost" size="sm" className="w-full justify-start text-red-400 hover:text-red-300" onClick={onLogout}>
+             Log Out
+           </Button>
+        </div>
+      </aside>
+
+      {/* Main Content Area */}
+      <main className="min-w-0 flex-1 flex flex-col overflow-hidden relative">
+        <div className="absolute inset-0 bg-grid-pattern opacity-5 pointer-events-none"></div>
+
+        {/* Top Bar */}
+        <header className="min-h-14 md:h-16 border-b border-zinc-900 flex items-center justify-between px-4 md:px-8 py-2 bg-[#050505]">
+          <div className="flex items-center gap-3 min-w-0">
+            <button
+              aria-label="Open admin navigation menu"
+              className="md:hidden w-9 h-9 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white"
+              onClick={() => setIsSidebarOpen(true)}
+            >
+              ☰
+            </button>
+            <h1 className="text-sm sm:text-base md:text-lg font-bold text-white truncate">
+            {activeTab === 'OVERVIEW' && 'Platform Overview'}
+            {activeTab === 'OPERATIONS' && 'Operations & Integrations'}
+            {activeTab === 'WAITLIST' && 'Beta Waitlist Management'}
+            {activeTab === 'USERS' && 'Customer Support'}
+            {activeTab === 'KYC' && 'KYC Compliance Queue'}
+            {activeTab === 'DISPUTES' && 'Arbitration Center'}
+            {activeTab === 'KNOWLEDGE' && 'Employee Knowledge Base'}
+            {activeTab === 'TEAM' && 'Employee Onboarding'}
+            {activeTab === 'TELEMETRY' && 'Telemetry & Consent'}
+            </h1>
+          </div>
+          <div className="flex items-center gap-2 md:gap-4 flex-wrap justify-end">
+             {onExitToUser && (
+               <Button
+                 size="sm"
+                 variant="outline"
+                 className="border-amber-500/40 text-amber-300 hover:text-amber-200"
+                 onClick={onExitToUser}
+               >
+                 Return to User App
+               </Button>
+             )}
+             <button 
+               onClick={() => setIsChatOpen(!isChatOpen)}
+               className={`flex items-center gap-2 px-3 py-1.5 rounded-full border transition-all 
+                 ${isChatOpen 
+                   ? 'bg-[#00e599]/10 border-[#00e599]/50 text-[#00e599]' 
+                   : hasUnreadMessages 
+                     ? 'bg-orange-500/20 border-orange-500 text-orange-500 animate-pulse' 
+                     : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
+                 }`}
+             >
+                <div className="relative">
+                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path></svg>
+                   {/* Blink Badge */}
+                   <span className={`absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full border-2 border-[#050505] transition-colors ${hasUnreadMessages ? 'bg-orange-500 animate-bounce' : 'bg-[#00e599]'}`}></span>
+                </div>
+                <span className="text-xs font-bold hidden sm:inline">
+                  {hasUnreadMessages ? 'New Message' : 'Team Chat'}
+                </span>
+             </button>
+             <div className="hidden lg:block text-xs text-zinc-500 font-mono">
+               System Status:{' '}
+               <span className={hasCriticalOpsAlerts ? 'text-red-500' : 'text-[#00e599]'}>
+                 {hasCriticalOpsAlerts ? 'ATTENTION REQUIRED' : 'OPERATIONAL'}
+               </span>{' '}
+               • <span className="text-red-500">ADMIN MODE</span>
+             </div>
+          </div>
+        </header>
+
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 md:p-8 custom-scrollbar">
+          
+          {/* OVERVIEW TAB */}
+          {activeTab === 'OVERVIEW' && (
+            <div className="space-y-6 animate-fade-in">
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <h3 className="text-white font-bold">Operational Alerts</h3>
+                    <p className="text-xs text-zinc-500 mt-1">
+                      {opsAlerts.length === 0
+                        ? 'No active operational alerts.'
+                        : `${opsAlerts.length} alert(s) require review.`}
+                    </p>
+                  </div>
+                  <Button size="sm" variant="outline" onClick={() => handleTabChange('OPERATIONS')}>
+                    Open Operations
+                  </Button>
+                </div>
+                {opsAlerts.length > 0 && (
+                  <div className="mt-4 space-y-2">
+                    {opsAlerts.slice(0, 3).map((alertItem) => (
+                      <div key={alertItem.id} className={`rounded-lg border px-3 py-2 text-xs ${getAlertClasses(alertItem.severity)}`}>
+                        <div className="font-bold">{alertItem.title}</div>
+                        <div className="opacity-90">{alertItem.detail}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* TOP ACTIONS */}
+              <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
+                 <div className="text-xs text-zinc-500">
+                   {isKpiLoading ? 'Refreshing KPI telemetry...' : 'KPI telemetry auto-refreshes every 15s.'}
+                 </div>
+                 <Button onClick={() => DocumentService.generatePitchDeck()} size="sm" variant="outline" className="w-full sm:w-auto">
+                   <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                   Download Investor Pitch Deck (PDF)
+                 </Button>
+              </div>
+
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+                <h3 className="text-white font-bold mb-2">Performance Heads-Up</h3>
+                {!kpiSnapshot ? (
+                  <div className="text-sm text-zinc-500">Collecting live performance telemetry...</div>
+                ) : (
+                  <div className="space-y-2">
+                    {kpiSnapshot.headsUp.map((item, index) => (
+                      <div key={`${index}-${item}`} className="text-sm text-zinc-300">
+                        {index + 1}. {item}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-4">
+                <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
+                  <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-1">Live Users</div>
+                  <div className="text-2xl font-bold text-[#00e599]">{kpiSnapshot?.liveUsers || 0}</div>
+                </div>
+                <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
+                  <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-1">Active (24h)</div>
+                  <div className="text-2xl font-bold text-blue-400">{kpiSnapshot?.activeUsers24h || 0}</div>
+                </div>
+                <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
+                  <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-1">Money In System</div>
+                  <div className="text-2xl font-bold text-white">
+                    ${(kpiSnapshot?.moneyInSystemUsd || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                  </div>
+                </div>
+                <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
+                  <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-1">Verified</div>
+                  <div className="text-2xl font-bold text-emerald-400">{kpiSnapshot?.verifiedUsers || 0}</div>
+                </div>
+                <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
+                  <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-1">Unverified</div>
+                  <div className="text-2xl font-bold text-amber-400">{kpiSnapshot?.unverifiedUsers || 0}</div>
+                </div>
+                <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
+                  <div className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider mb-1">Waitlist Pending</div>
+                  <div className="text-2xl font-bold text-purple-400">{kpiSnapshot?.waitlistPending || 0}</div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+                  <h3 className="text-white font-bold mb-4">Live Network Graph</h3>
+                  <div className="h-72 rounded-xl bg-black/40 border border-zinc-800 overflow-x-auto overflow-y-hidden">
+                    <div className="relative h-full min-w-[600px]">
+                    <svg className="absolute inset-0 w-full h-full" viewBox="0 0 600 280">
+                      <line x1="300" y1="140" x2="110" y2="70" stroke="#3f3f46" strokeWidth="1.5" />
+                      <line x1="300" y1="140" x2="490" y2="70" stroke="#3f3f46" strokeWidth="1.5" />
+                      <line x1="300" y1="140" x2="110" y2="210" stroke="#3f3f46" strokeWidth="1.5" />
+                      <line x1="300" y1="140" x2="490" y2="210" stroke="#3f3f46" strokeWidth="1.5" />
+
+                      <circle cx="300" cy="140" r="40" fill="#00e59922" stroke="#00e599" strokeWidth="2" />
+                      <circle cx="110" cy="70" r="28" fill="#2563eb22" stroke="#60a5fa" strokeWidth="2" />
+                      <circle cx="490" cy="70" r="28" fill="#10b98122" stroke="#34d399" strokeWidth="2" />
+                      <circle cx="110" cy="210" r="28" fill="#f59e0b22" stroke="#fbbf24" strokeWidth="2" />
+                      <circle cx="490" cy="210" r="28" fill="#a855f722" stroke="#c084fc" strokeWidth="2" />
+                    </svg>
+                    <div className="absolute top-[122px] left-[262px] text-center">
+                      <div className="text-[11px] text-zinc-400">Live Users</div>
+                      <div className="text-xl font-bold text-[#00e599]">{kpiSnapshot?.liveUsers || 0}</div>
+                    </div>
+                    <div className="absolute top-[54px] left-[80px] text-center">
+                      <div className="text-[10px] text-zinc-500">Guests</div>
+                      <div className="text-sm font-bold text-blue-300">{kpiSnapshot?.networkMetrics.liveGuests || 0}</div>
+                    </div>
+                    <div className="absolute top-[54px] left-[455px] text-center">
+                      <div className="text-[10px] text-zinc-500">Verified</div>
+                      <div className="text-sm font-bold text-emerald-300">{kpiSnapshot?.networkMetrics.liveVerified || 0}</div>
+                    </div>
+                    <div className="absolute top-[194px] left-[70px] text-center">
+                      <div className="text-[10px] text-zinc-500">Unverified</div>
+                      <div className="text-sm font-bold text-amber-300">{kpiSnapshot?.networkMetrics.liveUnverified || 0}</div>
+                    </div>
+                    <div className="absolute top-[194px] left-[440px] text-center">
+                      <div className="text-[10px] text-zinc-500">Active 24h</div>
+                      <div className="text-sm font-bold text-purple-300">{kpiSnapshot?.activeUsers24h || 0}</div>
+                    </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
+                  <h3 className="text-white font-bold">Traffic Source Breakdown (24h)</h3>
+                  {topSources.length === 0 ? (
+                    <div className="text-sm text-zinc-500">No attribution traffic yet.</div>
+                  ) : (
+                    topSources.map((item) => (
+                      <div key={item.source} className="space-y-1">
+                        <div className="flex justify-between text-xs">
+                          <span className="text-zinc-400">{item.source}</span>
+                          <span className="text-zinc-200 font-bold">{item.count}</span>
+                        </div>
+                        <div className="h-2 rounded bg-zinc-800 overflow-hidden">
+                          <div
+                            className="h-full bg-gradient-to-r from-[#00e599] to-emerald-500"
+                            style={{ width: `${Math.max(5, (item.count / maxSourceCount) * 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
+                  <h3 className="text-white font-bold">Access Heatmap By Country (24h)</h3>
+                  {topGeo.length === 0 ? (
+                    <div className="text-sm text-zinc-500">No geo telemetry yet.</div>
+                  ) : (
+                    topGeo.map((item) => (
+                      <div key={item.country} className="space-y-1">
+                        <div className="flex justify-between text-xs">
+                          <span className="text-zinc-400">{item.country}</span>
+                          <span className="text-zinc-200 font-bold">{item.count}</span>
+                        </div>
+                        <div className="h-2 rounded bg-zinc-800 overflow-hidden">
+                          <div
+                            className="h-full bg-gradient-to-r from-blue-500 to-cyan-400"
+                            style={{ width: `${Math.max(5, (item.count / maxGeoCount) * 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-3">
+                  <h3 className="text-white font-bold">Attribution Counters</h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="rounded-lg border border-zinc-800 bg-black/40 p-3">
+                      <div className="text-[10px] uppercase text-zinc-500">Referral</div>
+                      <div className="text-xl font-bold text-[#00e599]">{kpiSnapshot?.networkMetrics.referralVisits24h || 0}</div>
+                    </div>
+                    <div className="rounded-lg border border-zinc-800 bg-black/40 p-3">
+                      <div className="text-[10px] uppercase text-zinc-500">Invite Link</div>
+                      <div className="text-xl font-bold text-blue-400">{kpiSnapshot?.networkMetrics.inviteVisits24h || 0}</div>
+                    </div>
+                    <div className="rounded-lg border border-zinc-800 bg-black/40 p-3">
+                      <div className="text-[10px] uppercase text-zinc-500">Waitlist Invite</div>
+                      <div className="text-xl font-bold text-purple-400">{kpiSnapshot?.networkMetrics.waitlistVisits24h || 0}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-white font-bold">Live User Contact Feed</h3>
+                  <span className="text-xs text-zinc-500">{liveContacts.length} live contacts</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm text-zinc-400">
+                    <thead className="bg-black text-zinc-500 text-xs uppercase tracking-wider">
+                      <tr>
+                        <th className="p-3">Email</th>
+                        <th className="p-3">User ID</th>
+                        <th className="p-3">Verification</th>
+                        <th className="p-3">Source</th>
+                        <th className="p-3">Location</th>
+                        <th className="p-3">Last Seen</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {liveContacts.length === 0 ? (
+                        <tr>
+                          <td className="p-4 text-zinc-500" colSpan={6}>
+                            No live contact telemetry currently available.
+                          </td>
+                        </tr>
+                      ) : (
+                        liveContacts.map((contact) => (
+                          <tr key={`${contact.email}-${contact.lastSeen}`} className="border-t border-zinc-800">
+                            <td className="p-3 text-zinc-200">{contact.email}</td>
+                            <td className="p-3 text-zinc-500 font-mono text-xs">{contact.userId}</td>
+                            <td className="p-3">
+                              <span
+                                className={`px-2 py-1 rounded text-[10px] font-bold uppercase ${
+                                  contact.verification === 'VERIFIED'
+                                    ? 'bg-emerald-500/20 text-emerald-400'
+                                    : contact.verification === 'UNVERIFIED'
+                                    ? 'bg-amber-500/20 text-amber-400'
+                                    : 'bg-zinc-800 text-zinc-400'
+                                }`}
+                              >
+                                {contact.verification}
+                              </span>
+                            </td>
+                            <td className="p-3 text-zinc-300">{contact.source}</td>
+                            <td className="p-3 text-zinc-300">{contact.location}</td>
+                            <td className="p-3 text-zinc-500">{new Date(contact.lastSeen).toLocaleString()}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'OPERATIONS' && (
+            <div className="space-y-6 animate-fade-in">
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                <div>
+                  <h3 className="text-xl font-bold text-white">Operational Attention Center</h3>
+                  <p className="text-xs text-zinc-500">
+                    Review alerts, add missing keys, and rotate runtime credentials without redeploying.
+                  </p>
+                  {opsSnapshot?.generatedAt && (
+                    <p className="text-[10px] text-zinc-600 mt-1">
+                      Last refresh: {new Date(opsSnapshot.generatedAt).toLocaleString()}
+                    </p>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button size="sm" variant="outline" onClick={() => loadOpsSnapshot()} isLoading={isOpsLoading}>
+                    Refresh Status
+                  </Button>
+                </div>
+              </div>
+
+              {opsMessage && (
+                <div className="rounded-lg border border-blue-500/40 bg-blue-900/20 px-4 py-3 text-sm text-blue-300">
+                  {opsMessage}
+                </div>
+              )}
+
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h4 className="text-white font-bold">Mobile Push Notifications</h4>
+                    <p className="text-xs text-zinc-500">
+                      Receive support chat alerts when the admin portal is not open.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`px-2 py-1 rounded text-[10px] font-bold uppercase ${
+                        pushStatus.subscribed ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-zinc-400'
+                      }`}
+                    >
+                      {pushStatus.subscribed ? 'Subscribed' : 'Not Subscribed'}
+                    </span>
+                  </div>
+                </div>
+                <div className="text-xs text-zinc-400">
+                  Permission: {pushStatus.permission} · Platform: {pushStatus.isIos ? 'iOS' : 'Desktop/Android'}
+                  {pushStatus.isIos && !pushStatus.standalone ? ' · Install this PWA to Home Screen for iOS push support.' : ''}
+                </div>
+                {!pushStatus.supported ? (
+                  <div className="text-xs text-amber-400">
+                    Push is not supported in this browser/session. Try Android Chrome or installed iOS PWA.
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <Button size="sm" onClick={handleEnablePushNotifications} isLoading={isPushUpdating}>
+                      Enable Notifications
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={handleDisablePushNotifications} isLoading={isPushUpdating}>
+                      Disable Notifications
+                    </Button>
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <h4 className="text-white font-bold">Active Alerts</h4>
+                  <span className="text-xs text-zinc-500">{opsAlerts.length} total</span>
+                </div>
+                {opsAlerts.length === 0 ? (
+                  <div className="text-sm text-zinc-500">No operational alerts detected.</div>
+                ) : (
+                  <div className="space-y-3">
+                    {opsAlerts.map((alertItem) => (
+                      <div key={alertItem.id} className={`rounded-lg border p-4 ${getAlertClasses(alertItem.severity)}`}>
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="font-bold">{alertItem.title}</div>
+                            <div className="text-xs mt-1">{alertItem.detail}</div>
+                            <div className="text-xs mt-1 opacity-90">Action: {alertItem.action}</div>
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="text-[10px]"
+                            onClick={() => handleCreateAlertTicket(alertItem)}
+                          >
+                            Create Ticket
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h4 className="text-white font-bold">Operations Logs</h4>
+                    <p className="text-xs text-zinc-500">
+                      Recent client-side errors/warnings. Paste Render/Netlify logs below for AI analysis.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button size="sm" variant="outline" onClick={refreshClientLogs}>
+                      Refresh Logs
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={clearClientLogs}>
+                      Clear
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="max-h-72 overflow-y-auto overflow-x-auto rounded-lg border border-zinc-800 bg-black/40">
+                  {clientLogs.length === 0 ? (
+                    <div className="p-4 text-xs text-zinc-500">No logs captured yet.</div>
+                  ) : (
+                    <table className="w-full text-left text-xs text-zinc-400">
+                      <thead className="sticky top-0 bg-black text-zinc-500 uppercase tracking-wide">
+                        <tr>
+                          <th className="px-3 py-2">Time</th>
+                          <th className="px-3 py-2">Level</th>
+                          <th className="px-3 py-2">Source</th>
+                          <th className="px-3 py-2">Message</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {clientLogs.slice(0, 80).map((log) => (
+                          <tr key={log.id} className="border-t border-zinc-900">
+                            <td className="px-3 py-2 text-zinc-500">{new Date(log.timestamp).toLocaleTimeString()}</td>
+                            <td className={`px-3 py-2 font-bold ${log.level === 'error' ? 'text-red-400' : log.level === 'warn' ? 'text-amber-400' : 'text-blue-400'}`}>
+                              {log.level.toUpperCase()}
+                            </td>
+                            <td className="px-3 py-2 text-zinc-500">{log.source}</td>
+                            <td className="px-3 py-2 text-zinc-300 break-all">{log.message}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+
+                <div className="space-y-3 rounded-lg border border-zinc-800 bg-black/20 p-4">
+                  <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                    <div>
+                      <h5 className="text-sm font-bold text-white">User Log Explorer</h5>
+                      <p className="text-xs text-zinc-500">
+                        Persistent per-user warning/error logs from live sessions.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        value={selectedUserLogFilter}
+                        onChange={(e) => setSelectedUserLogFilter(e.target.value)}
+                        className="bg-black border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 focus:border-[#00e599] outline-none"
+                      >
+                        <option value="ALL">All Users</option>
+                        {userLogFilterOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      <Button size="sm" variant="outline" onClick={loadRemoteUserLogs} isLoading={isRemoteUserLogsLoading}>
+                        Refresh User Logs
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={downloadUserLogsCsv}>
+                        Download CSV
+                      </Button>
+                    </div>
+                  </div>
+
+                  <input
+                    value={userLogSearchTerm}
+                    onChange={(e) => setUserLogSearchTerm(e.target.value)}
+                    placeholder="Search logs by email, user id, session id, source, or message"
+                    className="w-full bg-black border border-zinc-700 rounded px-3 py-2 text-xs text-zinc-200 focus:border-[#00e599] outline-none"
+                  />
+
+                  <div className="max-h-72 overflow-y-auto overflow-x-auto rounded-lg border border-zinc-800 bg-black/40">
+                    {filteredRemoteUserLogs.length === 0 ? (
+                      <div className="p-4 text-xs text-zinc-500">
+                        {isRemoteUserLogsLoading ? 'Loading user logs...' : 'No persistent user logs found for this filter.'}
+                      </div>
+                    ) : (
+                      <table className="w-full text-left text-xs text-zinc-400">
+                        <thead className="sticky top-0 bg-black text-zinc-500 uppercase tracking-wide">
+                          <tr>
+                            <th className="px-3 py-2">Time</th>
+                            <th className="px-3 py-2">User</th>
+                            <th className="px-3 py-2">Level</th>
+                            <th className="px-3 py-2">Source</th>
+                            <th className="px-3 py-2">Message</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredRemoteUserLogs.slice(0, 250).map((log) => (
+                            <tr key={log.id} className="border-t border-zinc-900 align-top">
+                              <td className="px-3 py-2 text-zinc-500 whitespace-nowrap">
+                                {new Date(log.timestamp).toLocaleString()}
+                              </td>
+                              <td className="px-3 py-2 text-zinc-300">
+                                <div className="font-mono text-[11px]">{log.email || 'guest'}</div>
+                                <div className="text-[10px] text-zinc-600">{log.userId || 'anonymous'} · {log.sessionId || 'no-session'}</div>
+                              </td>
+                              <td className={`px-3 py-2 font-bold ${log.level === 'error' ? 'text-red-400' : log.level === 'warn' ? 'text-amber-400' : 'text-blue-400'}`}>
+                                {log.level.toUpperCase()}
+                              </td>
+                              <td className="px-3 py-2 text-zinc-500">{log.source}</td>
+                              <td className="px-3 py-2 text-zinc-300 break-all">
+                                <div>{log.message}</div>
+                                {log.context && <div className="text-zinc-500 mt-1">{log.context}</div>}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] uppercase tracking-wide text-zinc-500 font-bold">
+                    External Deployment Logs (Optional)
+                  </label>
+                  <textarea
+                    value={externalLogText}
+                    onChange={(e) => setExternalLogText(e.target.value)}
+                    placeholder="Paste Render/Netlify/Supabase logs here for deeper AI diagnosis."
+                    className="w-full min-h-[120px] bg-black border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-200 focus:border-[#00e599] outline-none"
+                  />
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button size="sm" onClick={analyzeLogsWithAI} isLoading={isAiAnalyzing}>
+                    Analyze Logs with GPT Codex
+                  </Button>
+                  {aiAnalysis && (
+                    <Button size="sm" variant="secondary" onClick={applyAiFixes}>
+                      Apply Suggested Fixes
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+              {aiAnalysis && (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
+                  <div>
+                    <h4 className="text-white font-bold">AI Incident Analysis</h4>
+                    <p className="text-xs text-zinc-500">Confidence: {(aiAnalysis.confidence * 100).toFixed(0)}%</p>
+                  </div>
+
+                  <div className="rounded-lg border border-zinc-800 bg-black/30 p-3 text-sm text-zinc-300">
+                    <div className="text-xs text-zinc-500 uppercase tracking-wide mb-1">Summary</div>
+                    <div>{aiAnalysis.summary}</div>
+                  </div>
+
+                  <div className="rounded-lg border border-zinc-800 bg-black/30 p-3 text-sm text-zinc-300">
+                    <div className="text-xs text-zinc-500 uppercase tracking-wide mb-1">Probable Root Cause</div>
+                    <div>{aiAnalysis.probableRootCause}</div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="rounded-lg border border-zinc-800 bg-black/30 p-3">
+                      <div className="text-xs text-zinc-500 uppercase tracking-wide mb-2">Recommendations</div>
+                      <ul className="space-y-1 text-sm text-zinc-300">
+                        {aiAnalysis.recommendations.length === 0 ? (
+                          <li>No recommendations returned.</li>
+                        ) : (
+                          aiAnalysis.recommendations.map((item, index) => (
+                            <li key={`${index}-${item}`}>{index + 1}. {item}</li>
+                          ))
+                        )}
+                      </ul>
+                    </div>
+                    <div className="rounded-lg border border-zinc-800 bg-black/30 p-3">
+                      <div className="text-xs text-zinc-500 uppercase tracking-wide mb-2">Planned Actions</div>
+                      <ul className="space-y-1 text-sm text-zinc-300">
+                        {aiAnalysis.actions.length === 0 ? (
+                          <li>No auto-actions available.</li>
+                        ) : (
+                          aiAnalysis.actions.map((action, index) => (
+                            <li key={`action-${index}`}>
+                              {index + 1}. {action.type === 'update_runtime_config'
+                                ? `${action.mode.toUpperCase()} ${action.key}: ${action.reason}`
+                                : action.type === 'create_ticket'
+                                ? `Create ticket: ${action.title}`
+                                : `${action.instruction}`}
+                            </li>
+                          ))
+                        )}
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {(opsSnapshot?.integrations || []).map((integration) => (
+                  <div key={integration.key} className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <h4 className="text-white font-bold">{integration.label}</h4>
+                        <p className="text-xs text-zinc-500 mt-1">{integration.description}</p>
+                      </div>
+                      <span className={`text-[10px] font-bold px-2 py-1 rounded border ${getIntegrationStatusClasses(integration)}`}>
+                        {integration.statusText}
+                      </span>
+                    </div>
+
+                    <div className="text-xs text-zinc-500 space-y-1">
+                      <div>Current: <span className="text-zinc-300">{integration.displayValue}</span></div>
+                      <div>Source: <span className="text-zinc-300 uppercase">{integration.source}</span></div>
+                      {integration.runtimeEntry && (
+                        <div>
+                          Runtime Updated: <span className="text-zinc-300">{new Date(integration.runtimeEntry.updatedAt).toLocaleString()}</span>
+                          {' '}by <span className="text-zinc-300">{integration.runtimeEntry.updatedBy}</span>
+                          {' '}({integration.runtimeEntry.rotationCount} rotations)
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="text-[10px] uppercase tracking-wide text-zinc-500 font-bold">
+                        {integration.isSecret ? 'Add Or Rotate Secret' : 'Update Value'}
+                      </label>
+                      {isJsonIntegration(integration.key) ? (
+                        <textarea
+                          value={opsDrafts[integration.key] || ''}
+                          onChange={(e) => handleOpsDraftChange(integration.key, e.target.value)}
+                          placeholder={integration.effectiveValue || '{}'}
+                          className="w-full min-h-[96px] bg-black border border-zinc-700 rounded px-3 py-2 text-xs font-mono text-white focus:border-[#00e599] outline-none"
+                        />
+                      ) : (
+                        <input
+                          type={integration.inputType}
+                          value={opsDrafts[integration.key] || ''}
+                          onChange={(e) => handleOpsDraftChange(integration.key, e.target.value)}
+                          placeholder={integration.isSecret ? `Enter ${integration.label}` : integration.effectiveValue}
+                          className="w-full bg-black border border-zinc-700 rounded px-3 py-2 text-sm text-white focus:border-[#00e599] outline-none"
+                        />
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button size="sm" onClick={() => handleSaveIntegration(integration)}>
+                        Save
+                      </Button>
+                      <Button size="sm" variant="secondary" onClick={() => handleRotateIntegration(integration)}>
+                        Rotate
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => handleResetToEnvironment(integration)}>
+                        Reset
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'WAITLIST' && (
+            <div className="animate-fade-in">
+               <div className="flex flex-col lg:flex-row lg:justify-between lg:items-center gap-4 mb-6">
+                  <div>
+                    <h3 className="text-xl font-bold text-white">Waitlist Queue</h3>
+                    <p className="text-xs text-zinc-500">Oldest sign-ups are at the top.</p>
+                    {waitlistSyncSummary && (
+                      <p className="text-xs text-[#00e599] mt-1">
+                        Waitlist sync complete ({new Date(waitlistSyncSummary.syncedAt).toLocaleTimeString()}): total{' '}
+                        {waitlistSyncSummary.total ?? waitlistSyncSummary.scanned}, pending {waitlistSyncSummary.pending ?? 0}, invited{' '}
+                        {waitlistSyncSummary.invited ?? 0}, onboarded {waitlistSyncSummary.onboarded ?? 0}.
+                      </p>
+                    )}
+                    {waitlistSyncError && (
+                      <p className="text-xs text-red-400 mt-1">
+                        Waitlist sync failed: {waitlistSyncError}
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3 bg-zinc-900 p-2 rounded-lg border border-zinc-800">
+                    <Button size="sm" variant="secondary" onClick={handleWaitlistNetlifySync} isLoading={isWaitlistSyncing}>
+                      Sync Waitlist
+                    </Button>
+                    <span className="text-xs text-zinc-500 font-bold uppercase ml-2">Batch Rollout:</span>
+                    <input 
+                      type="number" 
+                      min="1" 
+                      max="1000" 
+                      value={batchSize} 
+                      onChange={(e) => setBatchSize(parseInt(e.target.value))}
+                      className="w-16 bg-black border border-zinc-700 rounded px-2 py-1 text-white text-sm text-center focus:border-[#00e599] outline-none"
+                    />
+                    <Button size="sm" onClick={handleBatchRollout} isLoading={isRollingOut}>
+                      Invite Next {batchSize}
+                    </Button>
+                  </div>
+               </div>
+
+               <form
+                 onSubmit={handleManualInvite}
+                 className="mb-6 bg-zinc-900 border border-zinc-800 rounded-xl p-4 flex flex-col lg:flex-row lg:items-end gap-3"
+               >
+                 <div className="flex-1">
+                   <label className="text-[10px] uppercase tracking-wide text-zinc-500 font-bold">Manual Invite Email</label>
+                   <input
+                     type="email"
+                     value={manualInviteEmail}
+                     onChange={(e) => setManualInviteEmail(e.target.value)}
+                     placeholder="user@example.com"
+                     className="mt-1 w-full bg-black border border-zinc-700 rounded px-3 py-2 text-sm text-white focus:border-[#00e599] outline-none"
+                     required
+                   />
+                 </div>
+                 <div className="flex-1">
+                   <label className="text-[10px] uppercase tracking-wide text-zinc-500 font-bold">Name (Optional)</label>
+                   <input
+                     type="text"
+                     value={manualInviteName}
+                     onChange={(e) => setManualInviteName(e.target.value)}
+                     placeholder="Optional display name"
+                     className="mt-1 w-full bg-black border border-zinc-700 rounded px-3 py-2 text-sm text-white focus:border-[#00e599] outline-none"
+                   />
+                 </div>
+                 <div>
+                   <Button type="submit" size="sm" isLoading={isManualInviting}>
+                     Send Invite
+                   </Button>
+                 </div>
+               </form>
+
+               <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+                <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm text-zinc-400">
+                   <thead className="bg-black text-white text-xs uppercase tracking-wider">
+                     <tr><th className="p-4">Queue #</th><th className="p-4">Date</th><th className="p-4">Name</th><th className="p-4">Email</th><th className="p-4">Status</th><th className="p-4 text-right">Actions</th></tr>
+                   </thead>
+                   <tbody>
+                     {waitlist.length === 0 ? (
+                       <tr>
+                        <td colSpan={6} className="p-8 text-center text-zinc-500">
+                          {waitlistSummaryTotal > 0
+                            ? `Queue summary reports ${waitlistSummaryTotal} users. Click "Sync Waitlist" to refresh row details.`
+                            : 'No users in waitlist.'}
+                        </td>
+                      </tr>
+                     ) : (
+                       waitlist.map((w, index) => (
+                         <tr key={w.id} className="border-t border-zinc-800 hover:bg-black/40">
+                           <td className="p-4 font-mono text-xs text-zinc-600">#{index + 1}</td>
+                           <td className="p-4 font-mono text-xs">{new Date(w.created_at).toLocaleDateString()}</td>
+                           <td className="p-4 text-white font-bold">{w.name}</td>
+                           <td className="p-4">{w.email}</td>
+                           <td className="p-4">
+                             <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase ${
+                               w.status === 'ONBOARDED' ? 'bg-green-500/20 text-green-500' :
+                               w.status === 'INVITED' ? 'bg-blue-500/20 text-blue-500' :
+                               'bg-zinc-800 text-zinc-400'
+                             }`}>
+                               {w.status}
+                             </span>
+                           </td>
+                           <td className="p-4 text-right">
+                             {w.status === 'PENDING' && (
+                               <Button size="sm" onClick={() => handleInviteWaitlist(w.id)}>Invite</Button>
+                             )}
+                           </td>
+                         </tr>
+                       ))
+                     )}
+                   </tbody>
+                </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {(activeTab === 'USERS' || activeTab === 'KYC') && (
+             <div className="flex flex-col lg:flex-row h-full gap-6 animate-fade-in">
+                {/* User List */}
+                <div className="w-full lg:w-1/3 max-h-[360px] lg:max-h-none flex flex-col bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+                   <div className="p-4 border-b border-zinc-800">
+                     <input 
+                       type="text" 
+                       placeholder="Search users..." 
+                       className="w-full bg-black border border-zinc-800 rounded-lg px-4 py-2 text-sm text-white focus:border-[#00e599] outline-none"
+                       value={searchTerm}
+                       onChange={e => setSearchTerm(e.target.value)}
+                     />
+                   </div>
+                   <div className="flex-1 overflow-y-auto custom-scrollbar divide-y divide-zinc-800/50">
+                     {(activeTab === 'KYC' ? pendingKYCUsers : filteredUsers).map(u => (
+                       <div 
+                         key={u.id}
+                         onClick={() => setSelectedUser(u)}
+                         className={`p-4 cursor-pointer hover:bg-black/50 transition-colors ${selectedUser?.id === u.id ? 'bg-black border-l-2 border-l-[#00e599]' : ''}`}
+                       >
+                         <div className="flex justify-between items-center">
+                           <div className="overflow-hidden pr-2">
+                             <div className="font-bold text-white truncate">{u.name}</div>
+                             <div className="text-[10px] text-zinc-500 font-mono truncate">{u.id}</div>
+                           </div>
+                           <div className="text-xs">
+                             {u.kycStatus}
+                           </div>
+                         </div>
+                       </div>
+                     ))}
+                   </div>
+                </div>
+                {/* User Details */}
+                <div className="flex-1 min-h-[420px] bg-zinc-900 border border-zinc-800 rounded-xl p-4 sm:p-6 overflow-y-auto custom-scrollbar">
+                   {selectedUser ? (
+                     <div className="space-y-8 animate-fade-in">
+                       <div className="flex flex-col lg:flex-row lg:justify-between lg:items-center gap-4">
+                          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 sm:gap-6">
+                             <div className="w-24 h-24 bg-black rounded-full flex items-center justify-center border-4 border-zinc-800 relative">
+                                <div className="w-20 h-20">
+                                   <ScoreGauge score={selectedUser.reputationScore} />
+                                </div>
+                                {selectedUser.avatarUrl && <img src={selectedUser.avatarUrl} className="absolute inset-0 w-full h-full object-cover rounded-full opacity-50" />}
+                             </div>
+                             <div>
+                               <h2 className="text-3xl font-bold text-white tracking-tight">{selectedUser.name}</h2>
+                               <p className="text-zinc-500 font-mono text-xs mb-2">{selectedUser.id}</p>
+                               <div className="flex gap-2">
+                                  <span className="bg-zinc-800 px-2 py-0.5 rounded text-xs text-zinc-400 border border-zinc-700">{selectedUser.kycTier}</span>
+                               </div>
+                             </div>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                             {(currentAdmin.role === 'RISK_OFFICER' || currentAdmin.role === 'ADMIN') && (
+                               <Button 
+                                 size="sm" 
+                                 variant={selectedUser.isFrozen ? "primary" : "danger"}
+                                 className={selectedUser.isFrozen ? "bg-[#00e599] text-black border-none" : "bg-red-900/30 text-red-400 border-red-900"}
+                                 onClick={() => handleFreezeAccount(selectedUser.id)}
+                               >
+                                 {selectedUser.isFrozen ? "Unfreeze Account" : "Freeze Account"}
+                               </Button>
+                             )}
+                          </div>
+                       </div>
+                       
+                       <div className="bg-black border border-zinc-800 rounded-xl overflow-hidden p-4">
+                          <div className="flex justify-between items-center mb-4">
+                             <h3 className="font-bold text-white text-sm">KYC Status</h3>
+                             <div className="flex gap-2">
+                                <Button size="sm" className="bg-green-600 hover:bg-green-500 text-white" onClick={() => handleKYCAction(selectedUser.id, 'APPROVE')}>Approve</Button>
+                                <Button size="sm" variant="danger" className="bg-red-900 hover:bg-red-800" onClick={() => handleKYCAction(selectedUser.id, 'REJECT')}>Reject</Button>
+                             </div>
+                          </div>
+                          <pre className="text-xs text-zinc-500 overflow-x-auto bg-zinc-900 p-2 rounded">{JSON.stringify(selectedUser.documents, null, 2)}</pre>
+                       </div>
+
+                       <div>
+                          <div className="flex justify-between items-center mb-2">
+                             <h3 className="font-bold text-zinc-500 text-xs uppercase tracking-wide">Admin Notes</h3>
+                             <Button size="sm" variant="ghost" onClick={() => handleAddAdminNote(selectedUser.id)}>+ Add Note</Button>
+                          </div>
+                          <div className="bg-black border border-zinc-800 rounded-lg p-4 min-h-[100px] text-sm text-zinc-400 whitespace-pre-wrap font-mono">
+                             {selectedUser.adminNotes || "No notes on file."}
+                          </div>
+                       </div>
+                     </div>
+                   ) : (
+                     <div className="h-full flex flex-col items-center justify-center text-zinc-600">
+                        <p>Select a user to view details.</p>
+                     </div>
+                   )}
+                </div>
+             </div>
+          )}
+
+          {activeTab === 'DISPUTES' && (
+             <div className="space-y-6 animate-fade-in">
+                <h3 className="text-xl font-bold text-white mb-6">Open Disputes</h3>
+                <div className="grid grid-cols-1 gap-4">
+                  {disputes.length === 0 ? (
+                    <div className="text-zinc-500 text-center py-10">No active disputes.</div>
+                  ) : disputes.map(dispute => (
+                     <div key={dispute.id} className="bg-zinc-900 border border-zinc-800 p-6 rounded-xl flex flex-col md:flex-row md:justify-between md:items-start gap-4">
+                        <div>
+                           <div className="flex items-center gap-3 mb-2">
+                              <span className={`px-2 py-0.5 text-[10px] font-bold uppercase rounded ${dispute.status === 'OPEN' ? 'bg-red-500/20 text-red-500' : 'bg-green-500/20 text-green-500'}`}>{dispute.status}</span>
+                              <span className="text-xs text-zinc-500">Created: {new Date(dispute.createdAt).toLocaleDateString()}</span>
+                           </div>
+                           <h4 className="text-white font-bold text-lg mb-1">{dispute.reason}</h4>
+                           <p className="text-sm text-zinc-400">
+                              Reporter: <span className="text-white">{dispute.reporterName}</span> vs Accused: <span className="text-white">{dispute.accusedName}</span>
+                           </p>
+                        </div>
+                        <div className="flex gap-2">
+                           {dispute.status === 'OPEN' && (
+                              <Button size="sm" onClick={() => handleResolveDispute(dispute.id, 'Resolved by Admin')}>Resolve</Button>
+                           )}
+                        </div>
+                     </div>
+                  ))}
+                </div>
+             </div>
+          )}
+
+          {activeTab === 'KNOWLEDGE' && (
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 h-full animate-fade-in">
+              <div className="xl:col-span-4 bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden flex flex-col">
+                 <div className="p-4 border-b border-zinc-800 bg-black/20">
+                   <h3 className="font-bold text-white text-sm uppercase tracking-wide">SOPs</h3>
+                 </div>
+                 <div className="flex-1 p-4 space-y-4 text-zinc-400 text-sm">
+                    <p>Standard Operating Procedures are available here.</p>
+                 </div>
+              </div>
+              <div className="xl:col-span-8 flex flex-col gap-6">
+                 <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
+                    <h3 className="font-bold text-white mb-4">Create Ticket</h3>
+                    <form onSubmit={handleCreateTicket} className="flex flex-col sm:flex-row gap-4">
+                       <input 
+                         required
+                         type="text" 
+                         placeholder="Subject" 
+                         className="flex-1 bg-black border border-zinc-800 rounded p-2 text-white"
+                         value={newTicket.subject}
+                         onChange={e => setNewTicket({...newTicket, subject: e.target.value})}
+                       />
+                       <Button type="submit" size="sm">Create</Button>
+                    </form>
+                 </div>
+                 <div className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden p-4 space-y-2">
+                    {internalTickets.map(ticket => (
+                       <div key={ticket.id} className="bg-black/40 border border-zinc-800 p-3 rounded flex flex-col sm:flex-row sm:justify-between gap-3">
+                          <div>
+                             <div className="text-white font-bold">{ticket.subject}</div>
+                             <div className="text-xs text-zinc-500">{ticket.status}</div>
+                          </div>
+                          {ticket.status === 'OPEN' && <Button size="sm" onClick={() => handleResolveInternalTicket(ticket.id)}>Resolve</Button>}
+                       </div>
+                    ))}
+                 </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'TELEMETRY' && (
+            <div className="space-y-6 animate-fade-in">
+              <p className="text-sm text-zinc-500">
+                Consent is first-party only (localStorage). Events below are from users who granted analytics consent. Policy version is stored with each event.
+              </p>
+              {isTelemetryLoading ? (
+                <p className="text-zinc-500">Loading telemetry…</p>
+              ) : (
+                <>
+                  <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+                    <h3 className="p-4 border-b border-zinc-800 font-bold text-white">Recent events</h3>
+                    <div className="overflow-x-auto max-h-64 overflow-y-auto">
+                      <table className="w-full text-left text-sm text-zinc-400">
+                        <thead className="bg-black text-white text-xs uppercase sticky top-0">
+                          <tr><th className="p-3">Time</th><th className="p-3">Event</th><th className="p-3">Anonymous ID</th><th className="p-3">Consent (policy)</th></tr>
+                        </thead>
+                        <tbody>
+                          {telemetryEvents.length === 0 ? (
+                            <tr><td colSpan={4} className="p-4 text-zinc-500">No events yet.</td></tr>
+                          ) : (
+                            telemetryEvents.map((e) => (
+                              <tr key={e.id} className="border-t border-zinc-800">
+                                <td className="p-3 font-mono text-xs">{new Date(e.created_at).toLocaleString()}</td>
+                                <td className="p-3">{e.event_name}</td>
+                                <td className="p-3 font-mono text-xs truncate max-w-[120px]">{e.anonymous_id}</td>
+                                <td className="p-3">{e.policy_version || '—'}</td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+                    <h3 className="p-4 border-b border-zinc-800 font-bold text-white">Derived features (scoring inputs)</h3>
+                    <div className="overflow-x-auto max-h-64 overflow-y-auto">
+                      <table className="w-full text-left text-sm text-zinc-400">
+                        <thead className="bg-black text-white text-xs uppercase sticky top-0">
+                          <tr><th className="p-3">Anonymous ID</th><th className="p-3">Event count</th><th className="p-3">Last event</th><th className="p-3">Score summary</th></tr>
+                        </thead>
+                        <tbody>
+                          {telemetryFeatures.length === 0 ? (
+                            <tr><td colSpan={4} className="p-4 text-zinc-500">No derived features yet.</td></tr>
+                          ) : (
+                            telemetryFeatures.map((f, i) => (
+                              <tr key={f.anonymous_id + i} className="border-t border-zinc-800">
+                                <td className="p-3 font-mono text-xs truncate max-w-[140px]">{f.anonymous_id}</td>
+                                <td className="p-3">{f.event_count}</td>
+                                <td className="p-3 font-mono text-xs">{f.last_event_at ? new Date(f.last_event_at).toLocaleString() : '—'}</td>
+                                <td className="p-3 font-mono text-xs max-w-[200px] truncate" title={JSON.stringify(f.scoring_inputs)}>{JSON.stringify(f.scoring_inputs).slice(0, 80)}…</td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'TEAM' && currentAdmin.role === 'ADMIN' && (
+            <div className="space-y-6 animate-fade-in">
+              <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
+                 <h2 className="text-xl font-bold text-white">Employee Management</h2>
+                 <Button onClick={() => setShowAddEmployee(true)}>+ Onboard Employee</Button>
+              </div>
+              {showAddEmployee && (
+                <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
+                   <form onSubmit={handleAddEmployee} className="flex flex-col md:flex-row gap-4">
+                      <input 
+                        type="text" 
+                        placeholder="Name" 
+                        className="bg-black border border-zinc-800 rounded p-2 text-white"
+                        value={newEmpData.name}
+                        onChange={e => setNewEmpData({...newEmpData, name: e.target.value})}
+                      />
+                      <input 
+                        type="email" 
+                        placeholder="Email" 
+                        className="bg-black border border-zinc-800 rounded p-2 text-white"
+                        value={newEmpData.email}
+                        onChange={e => setNewEmpData({...newEmpData, email: e.target.value})}
+                      />
+                      <Button type="submit">Create</Button>
+                   </form>
+                </div>
+              )}
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+                <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm text-zinc-400">
+                   <thead className="bg-black text-white">
+                     <tr><th className="p-4">Name</th><th className="p-4">Role</th><th className="p-4">Action</th></tr>
+                   </thead>
+                   <tbody>
+                     {employees.map(emp => (
+                       <tr key={emp.id} className="border-t border-zinc-800">
+                         <td className="p-4">{emp.name}</td>
+                         <td className="p-4">{emp.role}</td>
+                         <td className="p-4"><Button size="sm" variant="ghost" onClick={() => handleResetPasswordLink(emp)}>Reset PW</Button></td>
+                       </tr>
+                     ))}
+                   </tbody>
+                </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+        </div>
+      </main>
+    </div>
+  );
+};
