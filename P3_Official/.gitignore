@@ -1,0 +1,35 @@
+# Ignore parent directory files and folders
+../*
+!../P3_Official/
+
+# Node modules
+**/node_modules/
+**/dist/
+**/build/
+
+# Environment files with secrets (keep .env.example)
+**/.env.local
+**/.env.production
+
+# Dependencies
+**/package-lock.json
+
+# Logs
+*.log
+**/*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+
+# Docker volumes
+**/volumes/
+
+# Temporary files
+*.tmp
+*.temp
+**/tmp/
